@@ -138,6 +138,7 @@ class FingerspellingInference:
         self.sts_recording = False
         self.sts_started_at = time.monotonic()
         self.sts_letter_index = 0
+        self.sts_word_index = 0  # Current word group being displayed
         self.sign_image_cache = {}
         self.last_candidate = self.empty_candidate("warming up")
 
@@ -415,6 +416,20 @@ class FingerspellingInference:
     @staticmethod
     def sign_letters_from_text(text):
         return [char for char in text.upper() if "A" <= char <= "Z"]
+    
+    @staticmethod
+    def sign_words_from_text(text):
+        """Group letters into words based on spaces in original text.
+        Returns list of (word_letters, word_original) tuples.
+        Example: "hey how are" -> [([H,E,Y], "hey"), ([H,O,W], "how"), ([A,R,E], "are")]
+        """
+        words = text.upper().split()
+        result = []
+        for word in words:
+            letters = [char for char in word if "A" <= char <= "Z"]
+            if letters:
+                result.append((letters, word))
+        return result
 
     def sign_image_for_letter(self, letter):
         if letter in self.sign_image_cache:
@@ -453,24 +468,77 @@ class FingerspellingInference:
             recognizer.non_speaking_duration = 0.4
             if self.mic_energy_threshold is not None:
                 recognizer.energy_threshold = self.mic_energy_threshold
-            with sr.Microphone(device_index=self.mic_index) as source:
+            
+            # Try to open microphone with error handling
+            try:
+                source = sr.Microphone(device_index=self.mic_index)
+            except (OSError, ValueError) as e:
+                # Device not found or invalid index, try default
+                if self.mic_index is not None:
+                    self.sts_status = f"Mic {self.mic_index} not found; trying default"
+                    source = sr.Microphone(device_index=None)
+                else:
+                    raise
+            
+            with source:
                 if self.mic_dynamic_energy and self.mic_ambient_duration > 0:
                     recognizer.adjust_for_ambient_noise(source, duration=self.mic_ambient_duration)
                 self.sts_status = f"Listening now... threshold {int(recognizer.energy_threshold)}"
                 audio = recognizer.listen(source, timeout=self.mic_timeout, phrase_time_limit=self.mic_phrase_time_limit)
+            
+            # Save audio to file for debugging
+            audio_file = self._save_audio_capture(audio)
+            self.sts_status = f"Captured: {audio_file.name}"
+            
             self.sts_status = "Recognizing..."
-            self.sts_text = recognizer.recognize_google(audio)
-            self.sts_letter_index = 0
-            self.sts_started_at = time.monotonic()
-            self.sts_status = "Speech captured"
+            try:
+                self.sts_text = recognizer.recognize_google(audio)
+                self.sts_letter_index = 0
+                self.sts_word_index = 0
+                self.sts_started_at = time.monotonic()
+                self.sts_status = "Speech captured"
+                print(f"✓ Recognition success: {self.sts_text}")
+            except sr.RequestError as e:
+                print(f"✗ Google API error: {e}")
+                self.sts_status = f"Google API error: {str(e)[:80]}"
+            except sr.UnknownValueError as e:
+                print(f"✗ Google cannot understand: {e}")
+                self.sts_status = "Voice heard, but speech was not understood"
         except sr.WaitTimeoutError:
             self.sts_status = "No voice detected; try --mic-index or speak closer"
         except sr.UnknownValueError:
             self.sts_status = "Voice heard, but speech was not understood"
         except Exception as exc:
-            self.sts_status = f"Microphone failed: {exc}"
+            print(f"✗ Microphone error: {exc}")
+            self.sts_status = f"Microphone error: {exc}"
         finally:
             self.sts_recording = False
+    
+    def _save_audio_capture(self, audio_data):
+        """Save captured audio to WAV file for debugging"""
+        try:
+            import wave
+            
+            # Create audio_captures folder
+            audio_dir = PROJECT_ROOT / "audio_captures"
+            audio_dir.mkdir(exist_ok=True)
+            
+            # Generate filename with timestamp
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            audio_file = audio_dir / f"capture_{timestamp}.wav"
+            
+            # Save audio data
+            with wave.open(str(audio_file), "wb") as wav_file:
+                wav_file.setnchannels(1)  # Mono
+                wav_file.setsampwidth(2)   # 2 bytes per sample (16-bit)
+                wav_file.setframerate(audio_data.sample_rate)
+                wav_file.writeframes(audio_data.get_raw_data())
+            
+            print(f"✓ Audio saved: {audio_file}")
+            return audio_file
+        except Exception as e:
+            print(f"✗ Failed to save audio: {e}")
+            raise
 
     @staticmethod
     def put_panel_text(canvas, text, y, scale=0.65, color=(235, 235, 235), thickness=2):
@@ -510,32 +578,126 @@ class FingerspellingInference:
         return canvas
 
     def draw_speech_to_sign(self):
+        """Display all signs at once, grouped by words with spaces between groups, wrapping to new rows."""
         canvas = np.zeros((720, 1000, 3), dtype=np.uint8)
-        canvas[:220, :] = (22, 22, 22)
-        canvas[220:, :] = (8, 8, 8)
-        letters = self.sign_letters_from_text(self.sts_text)
-        if letters and time.monotonic() - self.sts_started_at >= 0.8:
-            self.sts_letter_index = (self.sts_letter_index + 1) % len(letters)
-            self.sts_started_at = time.monotonic()
-        self.put_panel_text(canvas, "Speech/Text to Sign", 42, 0.8, (100, 180, 255))
+        canvas[:200, :] = (22, 22, 22)
+        canvas[200:, :] = (8, 8, 8)
+        
+        self.put_panel_text(canvas, "Speech/Text to Sign - All Signs At Once", 42, 0.8, (100, 180, 255))
         self.put_panel_text(canvas, "M Record microphone | C Clear | 1 Sign-to-Speech | Q Quit", 82, 0.55, (180, 180, 180), 1)
         self.put_panel_text(canvas, f"Mic: {self.fit_text(self.sts_status, 84)}", 122, 0.58)
         self.put_panel_text(canvas, f"Text: {self.fit_text(self.sts_text or '--', 92)}", 160, 0.62)
-        self.put_panel_text(canvas, f"Letters: {' '.join(letters) if letters else '--'}", 198, 0.58, (220, 220, 220))
-        if not letters:
-            self.put_panel_text(canvas, "Press M and speak, then signs will play here.", 470, 0.75, (180, 180, 180))
+        
+        # Get words (grouped by spaces)
+        words = self.sign_words_from_text(self.sts_text)
+        
+        if not words:
+            self.put_panel_text(canvas, "Press M and speak, then all signs will appear here.", 430, 0.75, (180, 180, 180))
             return canvas
-        letter = letters[self.sts_letter_index]
-        image_path = self.sign_image_for_letter(letter)
-        if image_path is None:
-            self.put_panel_text(canvas, f"No sign image found for {letter}", 470, 0.8, (80, 80, 255))
-            return canvas
-        image = cv2.imread(str(image_path))
-        if image is None:
-            self.put_panel_text(canvas, f"Could not read image for {letter}", 470, 0.8, (80, 80, 255))
-            return canvas
-        canvas[250:680, 140:860] = self.letterbox(image, 720, 430)
-        cv2.putText(canvas, letter, (470, 705), cv2.FONT_HERSHEY_SIMPLEX, 1.3, (255, 255, 255), 3)
+        
+        # Display parameters
+        sign_size = 70  # Slightly smaller for better fit
+        letter_gap = 8  # Gap between letters
+        word_gap = 20   # Gap between word groups
+        row_height = 100  # Height per row
+        max_width = 980  # Max width for signs
+        start_x = 10
+        start_y = 220
+        
+        # Build rows of signs
+        rows = []  # Each row: [(image_path, letter, word_orig), ...]
+        current_row = []
+        current_x = start_x
+        current_word_group_start = 0
+        
+        for word_idx, (letters, word_orig) in enumerate(words):
+            # Add word gap between word groups
+            if word_idx > 0:
+                current_x += word_gap
+            
+            word_group_start_x = current_x
+            
+            # Add each letter in the word
+            for letter_idx, letter in enumerate(letters):
+                # Check if we need to wrap to next row
+                if current_x + sign_size > max_width:
+                    # Start new row
+                    rows.append(current_row)
+                    current_row = []
+                    current_x = start_x
+                
+                # Add sign to current row
+                image_path = self.sign_image_for_letter(letter)
+                current_row.append({
+                    'image_path': image_path,
+                    'letter': letter,
+                    'word': word_orig,
+                    'x': current_x,
+                    'row': len(rows)
+                })
+                
+                current_x += sign_size + letter_gap
+        
+        # Add last row
+        if current_row:
+            rows.append(current_row)
+        
+        # Draw all signs
+        for row_idx, row_items in enumerate(rows):
+            row_y = start_y + row_idx * row_height
+            word_labels_drawn = set()  # Track which word labels we've drawn
+            
+            for item in row_items:
+                x = item['x']
+                y = row_y
+                letter = item['letter']
+                word = item['word']
+                image_path = item['image_path']
+                
+                # Draw sign image
+                if image_path:
+                    try:
+                        image = cv2.imread(str(image_path))
+                        if image is not None:
+                            resized = cv2.resize(image, (sign_size, sign_size))
+                            
+                            # Draw on canvas with bounds checking
+                            y1 = max(0, y)
+                            y2 = min(720, y + sign_size)
+                            x1 = max(10, x)
+                            x2 = min(990, x + sign_size)
+                            
+                            if y1 < y2 and x1 < x2:
+                                crop_h = y2 - y1
+                                crop_w = x2 - x1
+                                canvas[y1:y2, x1:x2] = resized[:crop_h, :crop_w]
+                                
+                                # Draw border
+                                cv2.rectangle(canvas, (x1, y1), (x2, y2), (100, 150, 200), 1)
+                                
+                                # Draw letter label
+                                cv2.putText(canvas, letter, (x1 + sign_size//2 - 6, y2 + 15), 
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                    except Exception as e:
+                        print(f"Error drawing sign {letter}: {e}")
+                else:
+                    # Placeholder for missing sign
+                    cv2.rectangle(canvas, (x, y), (x + sign_size, y + sign_size), (50, 50, 50), 2)
+                    cv2.putText(canvas, "?", (x + sign_size//2 - 5, y + sign_size//2 + 5), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 100, 100), 1)
+                
+                # Draw word label under each unique word (only once per word per row)
+                word_key = (word, row_idx)
+                if word_key not in word_labels_drawn:
+                    word_labels_drawn.add(word_key)
+                    label_y = y + sign_size + 30
+                    cv2.putText(canvas, word.upper(), (x, label_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (150, 200, 255), 1)
+        
+        # Add footer info
+        cv2.putText(canvas, f"Words: {len(words)} | Rows: {len(rows)}", (10, 710), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (160, 160, 160), 1)
+        
         return canvas
 
     def draw_hand_landmarks(self, frame, landmark_points):
@@ -637,6 +799,7 @@ class FingerspellingInference:
                     self.sts_text = ""
                     self.sts_status = "Cleared"
                     self.sts_letter_index = 0
+                    self.sts_word_index = 0
                 if key == ord("r"):
                     with self.state_lock:
                         self.reset_live_state()

@@ -1,0 +1,23 @@
+===============================================
+WORKING MICROPHONE SPEECH-TO-TEXT COMMAND
+===============================================
+
+Command:
+python realtime/inference_ctc.py --mic-index 2 --mic-energy-threshold 400 --mic-dynamic-energy
+
+Details:
+- Device: Microphone Array 2 (Realtek) - Index 2
+- Energy Threshold: 400 (adjusted for balance)
+- Dynamic Energy: ENABLED (auto-adjusts for ambient noise)
+- Result: Speech-to-text WORKING ✓
+
+Usage:
+1. Run the command above
+2. Press '2' for Speech-to-Sign mode
+3. Press 'M' to record
+4. Speak naturally (e.g., "hey how are you")
+5. Signs display on screen
+
+Status: FULLY FUNCTIONAL ✓
+Date: June 1, 2026
+===============================================
