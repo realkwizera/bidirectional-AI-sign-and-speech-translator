@@ -1,0 +1,9 @@
+/data/images
+/data/videos
+/data/landmark_cache
+/.env
+*/__pycache__
+*.log
+/checkpoints
+/__pycache__
+*md
